@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sort"
+	"os"
+	"path"
 	"sync"
 	"time"
 
@@ -51,25 +52,32 @@ type Shard struct {
 	lock     *sync.Mutex
 	lease    sync.Locker
 	lastUsed time.Time
+	dirPath  string
 	db       *sql.DB
 }
 
-func newShard(id string, storage Storer, lock sync.Locker) *Shard {
+func newShard(id string, dirPath string, storage Storer, lease sync.Locker) *Shard {
 	return &Shard{
 		id:       id,
 		storage:  storage,
 		lock:     &sync.Mutex{},
-		lease:    lock,
+		lease:    lease,
 		lastUsed: time.Now(),
+		dirPath:  dirPath,
 		db:       nil,
 	}
 }
 
 func (s *Shard) path() string {
-	return fmt.Sprintf("./dbs/%v.db", s.id)
+	return path.Join(
+		s.dirPath,
+		fmt.Sprintf("%s.db", s.id),
+	)
 }
 
 func (s *Shard) connect() *sql.DB {
+	log.Printf("Path %v", s.path())
+
 	db, err := sql.Open("sqlite3", s.path())
 	try(err)
 	return db
@@ -99,37 +107,38 @@ func (s *Shard) Close() {
 	s.db = nil
 }
 
-type LRURecord struct {
-	id string
-	ts time.Time
-}
-
 type Silo struct {
 	shards    map[string]*Shard
 	lock      *sync.Mutex
-	lru       []LRURecord
+	shardTtl  time.Duration
 	storage   Storer
 	lockMaker LockMaker
 	quitCh    chan bool
+	dirPath   string
 }
 
-func NewSilo(capacity int) *Silo {
+func NewSilo() *Silo {
 	silo := &Silo{
-		shards:    make(map[string]*Shard, capacity),
+		shards:    make(map[string]*Shard),
 		lock:      &sync.Mutex{},
-		lru:       make([]LRURecord, 0, capacity),
+		shardTtl:  time.Duration(15 * time.Second),
 		storage:   &NullStorage{},
 		lockMaker: &LocalLockMaker{},
 		quitCh:    make(chan bool, 1),
+		dirPath:   "./dbs",
 	}
 
+	err := os.MkdirAll(silo.dirPath, os.ModePerm)
+	try(err)
+
+	// Expire in the background
 	go func() {
 		ticker := time.Tick(5 * time.Second)
 
 		for {
 			select {
 			case <-ticker:
-				silo.expire(15 * time.Second)
+				silo.expire()
 			case <-silo.quitCh:
 				return
 			}
@@ -147,11 +156,9 @@ func (s *Silo) Shard(id string) *Shard {
 
 	shard, ok := s.shards[id]
 	if !ok {
-		shard = newShard(id, s.storage, s.lockMaker.Make(id))
+		shard = newShard(id, s.dirPath, s.storage, s.lockMaker.Make(id))
 		s.shards[id] = shard
 	}
-
-	s.lru = append(s.lru, LRURecord{id, time.Now()})
 
 	return shard
 }
@@ -179,40 +186,19 @@ func (s *Silo) Shutdown() {
 	wg.Wait()
 }
 
-func (s *Silo) expire(ttl time.Duration) {
+func (s *Silo) expire() {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	log.Printf("Expiring by lru len %v cap %v %v", len(s.lru), cap(s.lru), s.lru)
+	cutoff := time.Now().Add(-s.shardTtl)
 
-	cutoff := time.Now().Add(-ttl)
-	index := sort.Search(len(s.lru), func(i int) bool {
-		return s.lru[i].ts.After(cutoff)
-	})
-
-	log.Printf("Cutoff %v", index)
-
-	if index == 0 {
-		log.Printf("Nothing to expire")
-		return
-	}
-
-	shardsSeen := make(map[string]bool)
-
-	for _, rec := range s.lru[:index] {
-		shard, found := s.shards[rec.id]
-		if !found || shard.lastUsed.After(cutoff) {
+	for _, shard := range s.shards {
+		if shard.lastUsed.After(cutoff) {
 			continue
-		}
-		_, seen := shardsSeen[rec.id]
-		if seen {
-			continue
-		} else {
-			shardsSeen[rec.id] = true
 		}
 
 		// Save in parallel, without holding the silo lock
-		go func(rec LRURecord) {
+		go func(shard *Shard) {
 			shard.lock.Lock()
 			defer shard.lock.Unlock()
 
@@ -220,14 +206,12 @@ func (s *Silo) expire(ttl time.Duration) {
 
 			s.lock.Lock()
 			defer s.lock.Unlock()
-			delete(s.shards, rec.id)
-		}(rec)
+			delete(s.shards, shard.id)
+		}(shard)
 	}
-
-	s.lru = s.lru[index:]
 }
 
-var silo = NewSilo(1)
+var silo = NewSilo()
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	userID := r.Header.Get("X-User")
