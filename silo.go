@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -55,6 +56,7 @@ type Shard struct {
 	db           *sql.DB
 	lastUsed     time.Time
 	lock         *sync.Mutex
+	migrateCb    func(*sql.DB) bool
 	deactivateCh chan string
 	stopCh       chan bool
 	storage      Storer
@@ -63,7 +65,8 @@ type Shard struct {
 
 func newShard(
 	id string, dirPath string, ttl time.Duration, saveInterval time.Duration,
-	deactivateCh chan string, storage Storer, lease sync.Locker,
+	migrateCb func(*sql.DB) bool, deactivateCh chan string,
+	storage Storer, lease sync.Locker,
 ) *Shard {
 	return &Shard{
 		id:           id,
@@ -74,6 +77,7 @@ func newShard(
 		db:           nil,
 		lastUsed:     time.Now(),
 		lock:         &sync.Mutex{},
+		migrateCb:    migrateCb,
 		deactivateCh: deactivateCh,
 		stopCh:       make(chan bool),
 		storage:      storage,
@@ -106,6 +110,7 @@ func (s *Shard) Activate() *sql.DB {
 		log.Printf("Activating shard %v", s.id)
 		s.storage.Load(s.id, s.path())
 		s.db = s.connect()
+		s.migrateCb(s.db)
 
 		go func() {
 			for {
@@ -243,6 +248,16 @@ func (s *Silo) Stop() {
 	s.started = false
 }
 
+func migrate(db *sql.DB) bool {
+	log.Printf("Running migration")
+	data, err := ioutil.ReadFile("schema.sql")
+	try(err)
+
+	db.Exec(string(data))
+
+	return true
+}
+
 func (s *Silo) Shard(id string) *Shard {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -251,7 +266,8 @@ func (s *Silo) Shard(id string) *Shard {
 	if !ok {
 		shard = newShard(
 			id, s.dirPath, s.shardTtl, s.shardSaveInterval,
-			s.deactivateCh, s.storage, s.lockMaker.Make(id),
+			migrate, s.deactivateCh,
+			s.storage, s.lockMaker.Make(id),
 		)
 		s.shards[id] = shard
 	}
