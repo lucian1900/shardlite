@@ -1,11 +1,10 @@
-package main
+package shardlite
 
 import (
 	"database/sql"
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net/http"
 	"os"
 	"path"
 	"sync"
@@ -98,7 +97,6 @@ func (s *Shard) connect() *sql.DB {
 	db, err := sql.Open("sqlite3", s.path())
 	try(err)
 
-	// TODO run migrations
 	return db
 }
 
@@ -203,15 +201,15 @@ func (s *Silo) Start() {
 		return
 	}
 
-	err := os.MkdirAll(silo.dirPath, os.ModePerm)
+	err := os.MkdirAll(s.dirPath, os.ModePerm)
 	try(err)
 
 	go func() {
 		for {
 			select {
-			case shardId := <-silo.deactivateCh:
-				silo.removeShard(shardId)
-			case <-silo.stopCh:
+			case shardId := <-s.deactivateCh:
+				s.removeShard(shardId)
+			case <-s.stopCh:
 				return
 			}
 		}
@@ -280,31 +278,4 @@ func (s *Silo) removeShard(id string) {
 	defer s.lock.Unlock()
 
 	delete(s.shards, id)
-}
-
-var silo = NewSilo()
-
-func handler(w http.ResponseWriter, r *http.Request) {
-	userID := r.Header.Get("X-User")
-	shard := silo.Shard(userID)
-	db := shard.Activate()
-
-	db.Exec("INSERT INTO counters (count) VALUES (1)")
-
-	total := 0
-	row := db.QueryRow("SELECT SUM(count) FROM counters")
-	row.Scan(&total)
-
-	w.WriteHeader(200)
-	fmt.Fprintf(w, "%v\n", total)
-}
-
-func main() {
-	silo.Start()
-
-	http.HandleFunc("/", handler)
-
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		panic(err)
-	}
 }

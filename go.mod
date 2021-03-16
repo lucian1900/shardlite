@@ -1,4 +1,4 @@
-module bran.dev/shardlite
+module github.com/lucian1900/shardlite
 
 go 1.16
 
