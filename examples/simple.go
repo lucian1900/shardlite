@@ -1,17 +1,35 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/lucian1900/shardlite"
 )
 
-var silo = shardlite.NewSilo()
+type API struct {
+	users *shardlite.Silo
+}
 
-func handler(w http.ResponseWriter, r *http.Request) {
+func migrate(db *sql.DB) bool {
+	log.Printf("Running migration")
+
+	_, err := db.Exec(`create table if not exists counters (
+    	id integer primary key autoincrement,
+    	count integer
+	)`)
+	if err != nil {
+		panic(err)
+	}
+
+	return true
+}
+
+func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 	userID := r.Header.Get("X-User")
-	shard := silo.Shard(userID)
+	shard := a.users.Shard(userID)
 	db := shard.Activate()
 
 	db.Exec("INSERT INTO counters (count) VALUES (1)")
@@ -25,9 +43,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	silo.Start()
+	api := &API{shardlite.NewSilo("user", "dbs", migrate)}
+	api.users.Start()
 
-	http.HandleFunc("/", handler)
+	http.HandleFunc("/", api.handler)
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		panic(err)

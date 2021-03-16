@@ -3,7 +3,6 @@ package shardlite
 import (
 	"database/sql"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"path"
@@ -47,6 +46,7 @@ func (s *LocalLockMaker) Make(id string) sync.Locker {
 }
 
 type Shard struct {
+	shardType    string
 	id           string
 	dirPath      string
 	ttl          time.Duration
@@ -63,11 +63,13 @@ type Shard struct {
 }
 
 func newShard(
-	id string, dirPath string, ttl time.Duration, saveInterval time.Duration,
+	shardType string, id string, dirPath string,
+	ttl time.Duration, saveInterval time.Duration,
 	migrateCb func(*sql.DB) bool, deactivateCh chan string,
 	storage Storer, lease sync.Locker,
 ) *Shard {
 	return &Shard{
+		shardType:    shardType,
 		id:           id,
 		dirPath:      dirPath,
 		ttl:          ttl,
@@ -87,15 +89,17 @@ func newShard(
 func (s *Shard) path() string {
 	return path.Join(
 		s.dirPath,
+		s.shardType,
 		fmt.Sprintf("%s.db", s.id),
 	)
 }
 
 func (s *Shard) connect() *sql.DB {
-	//log.Printf("Path %v", s.path())
+	log.Printf("Path %v", s.path())
 
 	db, err := sql.Open("sqlite3", s.path())
 	try(err)
+	db.Ping()
 
 	return db
 }
@@ -166,6 +170,7 @@ func (s *Shard) Deactivate() {
 }
 
 type Silo struct {
+	shardType         string
 	started           bool
 	shards            map[string]*Shard
 	lock              *sync.Mutex
@@ -173,13 +178,15 @@ type Silo struct {
 	shardSaveInterval time.Duration
 	storage           Storer
 	lockMaker         LockMaker
+	migrateCb         func(*sql.DB) bool
 	stopCh            chan bool
 	deactivateCh      chan string
 	dirPath           string
 }
 
-func NewSilo() *Silo {
+func NewSilo(shardType string, dirPath string, migrateCb func(*sql.DB) bool) *Silo {
 	return &Silo{
+		shardType:         shardType,
 		started:           false,
 		shards:            make(map[string]*Shard),
 		lock:              &sync.Mutex{},
@@ -187,9 +194,10 @@ func NewSilo() *Silo {
 		shardSaveInterval: time.Duration(2 * time.Second),
 		storage:           &NullStorage{},
 		lockMaker:         &LocalLockMaker{},
+		migrateCb:         migrateCb,
 		stopCh:            make(chan bool, 1),
 		deactivateCh:      make(chan string),
-		dirPath:           "dbs",
+		dirPath:           dirPath,
 	}
 }
 
@@ -201,7 +209,7 @@ func (s *Silo) Start() {
 		return
 	}
 
-	err := os.MkdirAll(s.dirPath, os.ModePerm)
+	err := os.MkdirAll(path.Join(s.dirPath, s.shardType), os.ModePerm)
 	try(err)
 
 	go func() {
@@ -246,16 +254,6 @@ func (s *Silo) Stop() {
 	s.started = false
 }
 
-func migrate(db *sql.DB) bool {
-	log.Printf("Running migration")
-	data, err := ioutil.ReadFile("schema.sql")
-	try(err)
-
-	db.Exec(string(data))
-
-	return true
-}
-
 func (s *Silo) Shard(id string) *Shard {
 	s.lock.Lock()
 	defer s.lock.Unlock()
@@ -263,8 +261,8 @@ func (s *Silo) Shard(id string) *Shard {
 	shard, ok := s.shards[id]
 	if !ok {
 		shard = newShard(
-			id, s.dirPath, s.shardTtl, s.shardSaveInterval,
-			migrate, s.deactivateCh,
+			s.shardType, id, s.dirPath, s.shardTtl, s.shardSaveInterval,
+			s.migrateCb, s.deactivateCh,
 			s.storage, s.lockMaker.Make(id),
 		)
 		s.shards[id] = shard
