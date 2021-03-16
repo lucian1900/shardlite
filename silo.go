@@ -50,6 +50,7 @@ type Shard struct {
 	id           string
 	dirPath      string
 	ttl          time.Duration
+	saveInterval time.Duration
 	active       bool
 	db           *sql.DB
 	lastUsed     time.Time
@@ -61,13 +62,14 @@ type Shard struct {
 }
 
 func newShard(
-	id string, dirPath string, ttl time.Duration,
+	id string, dirPath string, ttl time.Duration, saveInterval time.Duration,
 	deactivateCh chan string, storage Storer, lease sync.Locker,
 ) *Shard {
 	return &Shard{
 		id:           id,
 		dirPath:      dirPath,
 		ttl:          ttl,
+		saveInterval: saveInterval,
 		active:       false,
 		db:           nil,
 		lastUsed:     time.Now(),
@@ -101,16 +103,21 @@ func (s *Shard) Activate() *sql.DB {
 	defer s.lock.Unlock()
 
 	if !s.active {
-		log.Printf("Loading shard %v", s.id)
+		log.Printf("Activating shard %v", s.id)
 		s.storage.Load(s.id, s.path())
 		s.db = s.connect()
 
 		go func() {
 			for {
 				select {
+				case <-time.After(s.saveInterval):
+					if time.Since(s.lastUsed) >= s.ttl {
+						s.Deactivate()
+					} else {
+						s.Save()
+					}
 				case <-time.After(s.ttl):
-					unused := time.Since(s.lastUsed)
-					if unused >= s.ttl {
+					if time.Since(s.lastUsed) >= s.ttl {
 						s.Deactivate()
 					}
 				case <-s.stopCh:
@@ -125,7 +132,7 @@ func (s *Shard) Activate() *sql.DB {
 	return s.db
 }
 
-func (s *Shard) Deactivate() {
+func (s *Shard) Save() {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -134,37 +141,52 @@ func (s *Shard) Deactivate() {
 	}
 
 	log.Printf("Saving shard %v", s.id)
+
+	s.storage.Save(s.id, s.path())
+}
+
+func (s *Shard) Deactivate() {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if !s.active {
+		return
+	}
+
+	log.Printf("Deactivating shard %v", s.id)
 	s.storage.Save(s.id, s.path())
 	err := s.db.Close()
 	try(err)
 
-	s.deactivateCh <- s.id
 	s.active = false
+	s.deactivateCh <- s.id
 }
 
 type Silo struct {
-	started      bool
-	shards       map[string]*Shard
-	lock         *sync.Mutex
-	shardTtl     time.Duration
-	storage      Storer
-	lockMaker    LockMaker
-	stopCh       chan bool
-	deactivateCh chan string
-	dirPath      string
+	started           bool
+	shards            map[string]*Shard
+	lock              *sync.Mutex
+	shardTtl          time.Duration
+	shardSaveInterval time.Duration
+	storage           Storer
+	lockMaker         LockMaker
+	stopCh            chan bool
+	deactivateCh      chan string
+	dirPath           string
 }
 
 func NewSilo() *Silo {
 	return &Silo{
-		started:      false,
-		shards:       make(map[string]*Shard),
-		lock:         &sync.Mutex{},
-		shardTtl:     time.Duration(5 * time.Second),
-		storage:      &NullStorage{},
-		lockMaker:    &LocalLockMaker{},
-		stopCh:       make(chan bool, 1),
-		deactivateCh: make(chan string),
-		dirPath:      "dbs",
+		started:           false,
+		shards:            make(map[string]*Shard),
+		lock:              &sync.Mutex{},
+		shardTtl:          time.Duration(5 * time.Second),
+		shardSaveInterval: time.Duration(2 * time.Second),
+		storage:           &NullStorage{},
+		lockMaker:         &LocalLockMaker{},
+		stopCh:            make(chan bool, 1),
+		deactivateCh:      make(chan string),
+		dirPath:           "dbs",
 	}
 }
 
@@ -227,7 +249,10 @@ func (s *Silo) Shard(id string) *Shard {
 
 	shard, ok := s.shards[id]
 	if !ok {
-		shard = newShard(id, s.dirPath, s.shardTtl, s.deactivateCh, s.storage, s.lockMaker.Make(id))
+		shard = newShard(
+			id, s.dirPath, s.shardTtl, s.shardSaveInterval,
+			s.deactivateCh, s.storage, s.lockMaker.Make(id),
+		)
 		s.shards[id] = shard
 	}
 
