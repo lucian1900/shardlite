@@ -9,22 +9,22 @@ import (
 	"github.com/lucian1900/shardlite"
 )
 
-type API struct {
-	users *shardlite.Silo
-}
-
 func migrate(db *sql.DB) bool {
 	log.Printf("Running migration")
 
-	_, err := db.Exec(`create table if not exists counters (
-    	id integer primary key autoincrement,
-    	count integer
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS counters (
+    	id INTEGER PRIMARY KEY AUTOINCREMENT,
+    	count INTEGER
 	)`)
 	if err != nil {
 		panic(err)
 	}
 
 	return true
+}
+
+type API struct {
+	users *shardlite.Silo
 }
 
 func (a *API) handler(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +43,7 @@ func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	api := &API{shardlite.NewSilo("user", "dbs", migrate)}
+	api := &API{shardlite.NewSilo("users", "dbs", migrate)}
 	api.users.Start()
 
 	http.HandleFunc("/", api.handler)
