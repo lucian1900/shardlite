@@ -3,6 +3,7 @@ package shardlite
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path"
@@ -19,19 +20,8 @@ func try(err error) {
 }
 
 type Storer interface {
-	Save(id string, path string) bool
-	Load(id string, path string) bool
-}
-
-type NullStorage struct {
-}
-
-func (s *NullStorage) Save(id string, path string) bool {
-	return true
-}
-
-func (s *NullStorage) Load(id string, path string) bool {
-	return true
+	Upload(kind string, id string, file io.ReadSeeker) error
+	Download(kind string, id string) (io.Reader, error)
 }
 
 type LockMaker interface {
@@ -84,7 +74,7 @@ func newShard(
 	}
 }
 
-func (s *Shard) path() string {
+func (s *Shard) dbPath() string {
 	return path.Join(
 		s.config.dirPath,
 		s.config.kind,
@@ -93,13 +83,36 @@ func (s *Shard) path() string {
 }
 
 func (s *Shard) connect() *sql.DB {
-	log.Printf("Path %v", s.path())
+	log.Printf("Path %v", s.dbPath())
 
-	db, err := sql.Open("sqlite3", s.path())
+	db, err := sql.Open("sqlite3", s.dbPath())
 	try(err)
-	db.Ping()
+	try(db.Ping())
 
 	return db
+}
+
+func (s *Shard) load() {
+	log.Printf("Loading shard %v", s.id)
+	download, err := s.config.storage.Download(s.config.kind, s.id)
+	if os.IsNotExist(err) {
+		return
+	} else {
+		try(err)
+	}
+	local, err := os.Create(s.dbPath())
+	try(err)
+	_, err = io.Copy(local, download)
+	try(err)
+}
+
+func (s *Shard) save() {
+	log.Printf("Saving shard %v", s.id)
+
+	local, err := os.Open(s.dbPath())
+	try(err)
+
+	try(s.config.storage.Upload(s.config.kind, s.id, local))
 }
 
 func (s *Shard) Activate() *sql.DB {
@@ -108,7 +121,7 @@ func (s *Shard) Activate() *sql.DB {
 
 	if !s.active {
 		log.Printf("Activating shard %v", s.id)
-		s.config.storage.Load(s.id, s.path())
+		s.load()
 		s.db = s.connect()
 		s.config.migrateCb(s.db)
 
@@ -145,9 +158,7 @@ func (s *Shard) Save() {
 		return
 	}
 
-	log.Printf("Saving shard %v", s.id)
-
-	s.config.storage.Save(s.id, s.path())
+	s.save()
 }
 
 func (s *Shard) Deactivate() {
@@ -159,9 +170,8 @@ func (s *Shard) Deactivate() {
 	}
 
 	log.Printf("Deactivating shard %v", s.id)
-	s.config.storage.Save(s.id, s.path())
-	err := s.db.Close()
-	try(err)
+	s.save()
+	try(s.db.Close())
 
 	s.active = false
 	s.deactivateCh <- s.id
@@ -176,7 +186,10 @@ type Silo struct {
 	config       *ShardConfig
 }
 
-func NewSilo(kind string, dirPath string, migrateCb func(*sql.DB) bool) *Silo {
+func NewSilo(
+	kind string, localPath string,
+	migrateCb func(*sql.DB) bool, storage Storer,
+) *Silo {
 	return &Silo{
 		started:      false,
 		shards:       make(map[string]*Shard),
@@ -185,11 +198,11 @@ func NewSilo(kind string, dirPath string, migrateCb func(*sql.DB) bool) *Silo {
 		deactivateCh: make(chan string),
 		config: &ShardConfig{
 			kind:         kind,
-			dirPath:      dirPath,
+			dirPath:      localPath,
 			ttl:          time.Duration(5 * time.Second),
 			saveInterval: time.Duration(2 * time.Second),
 			migrateCb:    migrateCb,
-			storage:      &NullStorage{},
+			storage:      storage,
 			lockMaker:    &LocalLockMaker{},
 		},
 	}
