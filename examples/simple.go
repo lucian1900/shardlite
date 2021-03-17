@@ -39,7 +39,6 @@ func (f Files) Upload(kind string, id string, in io.ReadSeeker) error {
 	if err != nil {
 		return err
 	}
-
 	out, err := os.Create(f.path(kind, id))
 	if err != nil {
 		return err
@@ -60,7 +59,7 @@ func (f Files) Download(kind string, id string) (io.Reader, error) {
 }
 
 type API struct {
-	users *shardlite.Silo
+	users *shardlite.Pile
 }
 
 func (a *API) handler(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +80,7 @@ func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	files := Files{"dbs"}
 
-	api := &API{shardlite.NewSilo(
+	api := &API{shardlite.NewPile(
 		"users",
 		path.Join(os.TempDir(), "simple"),
 		migrate,

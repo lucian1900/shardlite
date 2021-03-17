@@ -177,7 +177,7 @@ func (s *Shard) Deactivate() {
 	s.deactivateCh <- s.id
 }
 
-type Silo struct {
+type Pile struct {
 	started      bool
 	shards       map[string]*Shard
 	lock         *sync.Mutex
@@ -186,18 +186,18 @@ type Silo struct {
 	config       *ShardConfig
 }
 
-func NewSilo(
-	kind string, localPath string,
+func NewPile(
+	name string, localPath string,
 	migrateCb func(*sql.DB) bool, storage Storer,
-) *Silo {
-	return &Silo{
+) *Pile {
+	return &Pile{
 		started:      false,
 		shards:       make(map[string]*Shard),
 		lock:         &sync.Mutex{},
 		stopCh:       make(chan bool, 1),
 		deactivateCh: make(chan string),
 		config: &ShardConfig{
-			kind:         kind,
+			kind:         name,
 			dirPath:      localPath,
 			ttl:          time.Duration(5 * time.Second),
 			saveInterval: time.Duration(2 * time.Second),
@@ -208,45 +208,45 @@ func NewSilo(
 	}
 }
 
-func (s *Silo) Start() {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+func (p *Pile) Start() {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 
-	if s.started {
+	if p.started {
 		return
 	}
 
-	err := os.MkdirAll(path.Join(s.config.dirPath, s.config.kind), os.ModePerm)
+	err := os.MkdirAll(path.Join(p.config.dirPath, p.config.kind), os.ModePerm)
 	try(err)
 
 	go func() {
 		for {
 			select {
-			case shardId := <-s.deactivateCh:
-				s.removeShard(shardId)
-			case <-s.stopCh:
+			case shardId := <-p.deactivateCh:
+				p.removeShard(shardId)
+			case <-p.stopCh:
 				return
 			}
 		}
 	}()
 
-	s.started = true
+	p.started = true
 }
 
-func (s *Silo) Stop() {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+func (p *Pile) Stop() {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 
-	if !s.started {
+	if !p.started {
 		return
 	}
 
-	s.stopCh <- true
+	p.stopCh <- true
 	log.Println("Shutting down")
 
 	wg := &sync.WaitGroup{}
 
-	for _, shard := range s.shards {
+	for _, shard := range p.shards {
 		wg.Add(1)
 		go func(shard *Shard) {
 			shard.lock.Lock()
@@ -258,28 +258,28 @@ func (s *Silo) Stop() {
 	}
 
 	wg.Wait()
-	s.started = false
+	p.started = false
 }
 
-func (s *Silo) Shard(id string) *Shard {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+func (p *Pile) Shard(id string) *Shard {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 
-	shard, ok := s.shards[id]
+	shard, ok := p.shards[id]
 	if !ok {
 		shard = newShard(
-			id, s.deactivateCh, s.config.lockMaker.Make(id),
-			s.config,
+			id, p.deactivateCh, p.config.lockMaker.Make(id),
+			p.config,
 		)
-		s.shards[id] = shard
+		p.shards[id] = shard
 	}
 
 	return shard
 }
 
-func (s *Silo) removeShard(id string) {
-	s.lock.Lock()
-	defer s.lock.Unlock()
+func (p *Pile) removeShard(id string) {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 
-	delete(s.shards, id)
+	delete(p.shards, id)
 }
