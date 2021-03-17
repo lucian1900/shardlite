@@ -45,12 +45,14 @@ func (s *LocalLockMaker) Make(id string) sync.Locker {
 	return &sync.Mutex{}
 }
 
-type ShardOptions struct {
+type ShardConfig struct {
 	kind         string
 	dirPath      string
 	ttl          time.Duration
 	saveInterval time.Duration
 	migrateCb    func(*sql.DB) bool
+	storage      Storer
+	lockMaker    LockMaker
 }
 
 type Shard struct {
@@ -61,15 +63,13 @@ type Shard struct {
 	lock         *sync.Mutex
 	deactivateCh chan string
 	stopCh       chan bool
-	storage      Storer
 	lease        sync.Locker
-	options      ShardOptions
+	config       *ShardConfig
 }
 
 func newShard(
-	id string, deactivateCh chan string,
-	storage Storer, lease sync.Locker,
-	options ShardOptions,
+	id string, deactivateCh chan string, lease sync.Locker,
+	config *ShardConfig,
 ) *Shard {
 	return &Shard{
 		id:           id,
@@ -79,16 +79,15 @@ func newShard(
 		lock:         &sync.Mutex{},
 		deactivateCh: deactivateCh,
 		stopCh:       make(chan bool),
-		storage:      storage,
 		lease:        lease,
-		options:      options,
+		config:       config,
 	}
 }
 
 func (s *Shard) path() string {
 	return path.Join(
-		s.options.dirPath,
-		s.options.kind,
+		s.config.dirPath,
+		s.config.kind,
 		fmt.Sprintf("%s.db", s.id),
 	)
 }
@@ -109,21 +108,21 @@ func (s *Shard) Activate() *sql.DB {
 
 	if !s.active {
 		log.Printf("Activating shard %v", s.id)
-		s.storage.Load(s.id, s.path())
+		s.config.storage.Load(s.id, s.path())
 		s.db = s.connect()
-		s.options.migrateCb(s.db)
+		s.config.migrateCb(s.db)
 
 		go func() {
 			for {
 				select {
-				case <-time.After(s.options.saveInterval):
-					if time.Since(s.lastUsed) >= s.options.ttl {
+				case <-time.After(s.config.saveInterval):
+					if time.Since(s.lastUsed) >= s.config.ttl {
 						s.Deactivate()
 					} else {
 						s.Save()
 					}
-				case <-time.After(s.options.ttl):
-					if time.Since(s.lastUsed) >= s.options.ttl {
+				case <-time.After(s.config.ttl):
+					if time.Since(s.lastUsed) >= s.config.ttl {
 						s.Deactivate()
 					}
 				case <-s.stopCh:
@@ -148,7 +147,7 @@ func (s *Shard) Save() {
 
 	log.Printf("Saving shard %v", s.id)
 
-	s.storage.Save(s.id, s.path())
+	s.config.storage.Save(s.id, s.path())
 }
 
 func (s *Shard) Deactivate() {
@@ -160,7 +159,7 @@ func (s *Shard) Deactivate() {
 	}
 
 	log.Printf("Deactivating shard %v", s.id)
-	s.storage.Save(s.id, s.path())
+	s.config.storage.Save(s.id, s.path())
 	err := s.db.Close()
 	try(err)
 
@@ -172,30 +171,27 @@ type Silo struct {
 	started      bool
 	shards       map[string]*Shard
 	lock         *sync.Mutex
-	storage      Storer
-	lockMaker    LockMaker
 	stopCh       chan bool
 	deactivateCh chan string
-	options      ShardOptions
+	config       *ShardConfig
 }
 
 func NewSilo(kind string, dirPath string, migrateCb func(*sql.DB) bool) *Silo {
-	opts := ShardOptions{
-		kind:         kind,
-		dirPath:      dirPath,
-		ttl:          time.Duration(5 * time.Second),
-		saveInterval: time.Duration(2 * time.Second),
-		migrateCb:    migrateCb,
-	}
 	return &Silo{
-		options:      opts,
 		started:      false,
 		shards:       make(map[string]*Shard),
 		lock:         &sync.Mutex{},
-		storage:      &NullStorage{},
-		lockMaker:    &LocalLockMaker{},
 		stopCh:       make(chan bool, 1),
 		deactivateCh: make(chan string),
+		config: &ShardConfig{
+			kind:         kind,
+			dirPath:      dirPath,
+			ttl:          time.Duration(5 * time.Second),
+			saveInterval: time.Duration(2 * time.Second),
+			migrateCb:    migrateCb,
+			storage:      &NullStorage{},
+			lockMaker:    &LocalLockMaker{},
+		},
 	}
 }
 
@@ -207,7 +203,7 @@ func (s *Silo) Start() {
 		return
 	}
 
-	err := os.MkdirAll(path.Join(s.options.dirPath, s.options.kind), os.ModePerm)
+	err := os.MkdirAll(path.Join(s.config.dirPath, s.config.kind), os.ModePerm)
 	try(err)
 
 	go func() {
@@ -259,9 +255,8 @@ func (s *Silo) Shard(id string) *Shard {
 	shard, ok := s.shards[id]
 	if !ok {
 		shard = newShard(
-			id, s.deactivateCh,
-			s.storage, s.lockMaker.Make(id),
-			s.options,
+			id, s.deactivateCh, s.config.lockMaker.Make(id),
+			s.config,
 		)
 		s.shards[id] = shard
 	}
