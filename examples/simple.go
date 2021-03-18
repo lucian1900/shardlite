@@ -78,7 +78,7 @@ func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 	db, err := shard.Activate()
 	if err != nil {
 		switch e := err.(type) {
-		case *shardlite.ActivationError:
+		case *shardlite.AlreadyActiveError:
 			panic(e)
 		default:
 			panic(err)
@@ -96,8 +96,15 @@ func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	host, err := os.Hostname()
+	if err != nil {
+		panic(err)
+	}
+	port := 8080
+
 	config := &shardlite.Config{
 		Name:          "users",
+		Url:           fmt.Sprintf("http://%s:%d", host, port),
 		DbPath:        path.Join(os.TempDir(), "simple"),
 		SaveInterval:  time.Duration(2 * time.Second),
 		ActivationTtl: time.Duration(5 * time.Second),
@@ -110,7 +117,7 @@ func main() {
 
 	http.HandleFunc("/", api.handler)
 
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
 		panic(err)
 	}
 }

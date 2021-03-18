@@ -28,17 +28,17 @@ type LockerMaker interface {
 	Make(id string) sync.Locker
 }
 
-type ActivationError struct {
-	Host string
-	Port int16
+type AlreadyActiveError struct {
+	Url string
 }
 
-func (e *ActivationError) Error() string {
-	return fmt.Sprintf("already active: %s:%d", e.Host, e.Port)
+func (e *AlreadyActiveError) Error() string {
+	return fmt.Sprintf("already active: %s", e.Url)
 }
 
 type Config struct {
 	Name          string
+	Url           string
 	DbPath        string
 	MigrateCb     func(*sql.DB) bool
 	ActivationTtl time.Duration
@@ -70,7 +70,7 @@ func newShard(
 		lastUsed:     time.Now(),
 		lock:         &sync.Mutex{},
 		deactivateCh: deactivateCh,
-		stopCh:       make(chan bool),
+		stopCh:       make(chan bool, 1),
 		lease:        lease,
 		config:       config,
 	}
