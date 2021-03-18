@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"sync"
+	"time"
 
 	"github.com/lucian1900/shardlite"
 )
@@ -58,14 +60,30 @@ func (f Files) Download(kind string, id string) (io.Reader, error) {
 	return out, nil
 }
 
+type LocalLeaser struct {
+}
+
+func (s LocalLeaser) Make(id string) sync.Locker {
+	return &sync.Mutex{}
+}
+
 type API struct {
 	users *shardlite.Pile
 }
 
 func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 	userID := r.Header.Get("X-User")
+
 	shard := a.users.Shard(userID)
-	db := shard.Activate()
+	db, err := shard.Activate()
+	if err != nil {
+		switch e := err.(type) {
+		case *shardlite.ActivationError:
+			panic(e)
+		default:
+			panic(err)
+		}
+	}
 
 	db.Exec("INSERT INTO counters (count) VALUES (1)")
 
@@ -78,14 +96,16 @@ func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	files := Files{"dbs"}
-
-	api := &API{shardlite.NewPile(
-		"users",
-		path.Join(os.TempDir(), "simple"),
-		migrate,
-		files,
-	)}
+	config := &shardlite.Config{
+		Name:          "users",
+		DbPath:        path.Join(os.TempDir(), "simple"),
+		SaveInterval:  time.Duration(2 * time.Second),
+		ActivationTtl: time.Duration(5 * time.Second),
+		MigrateCb:     migrate,
+		Storage:       Files{"dbs"},
+		Leaser:        LocalLeaser{},
+	}
+	api := &API{shardlite.NewPile(config)}
 	api.users.Start()
 
 	http.HandleFunc("/", api.handler)

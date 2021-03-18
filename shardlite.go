@@ -24,25 +24,27 @@ type Storer interface {
 	Download(kind string, id string) (io.Reader, error)
 }
 
-type LockMaker interface {
+type LockerMaker interface {
 	Make(id string) sync.Locker
 }
 
-type LocalLockMaker struct {
+type ActivationError struct {
+	Host string
+	Port int16
 }
 
-func (s *LocalLockMaker) Make(id string) sync.Locker {
-	return &sync.Mutex{}
+func (e *ActivationError) Error() string {
+	return fmt.Sprintf("already active: %s:%d", e.Host, e.Port)
 }
 
-type ShardConfig struct {
-	kind         string
-	dirPath      string
-	ttl          time.Duration
-	saveInterval time.Duration
-	migrateCb    func(*sql.DB) bool
-	storage      Storer
-	lockMaker    LockMaker
+type Config struct {
+	Name          string
+	DbPath        string
+	MigrateCb     func(*sql.DB) bool
+	ActivationTtl time.Duration
+	SaveInterval  time.Duration
+	Storage       Storer
+	Leaser        LockerMaker
 }
 
 type Shard struct {
@@ -54,12 +56,12 @@ type Shard struct {
 	deactivateCh chan string
 	stopCh       chan bool
 	lease        sync.Locker
-	config       *ShardConfig
+	config       *Config
 }
 
 func newShard(
 	id string, deactivateCh chan string, lease sync.Locker,
-	config *ShardConfig,
+	config *Config,
 ) *Shard {
 	return &Shard{
 		id:           id,
@@ -76,8 +78,8 @@ func newShard(
 
 func (s *Shard) dbPath() string {
 	return path.Join(
-		s.config.dirPath,
-		s.config.kind,
+		s.config.DbPath,
+		s.config.Name,
 		fmt.Sprintf("%s.db", s.id),
 	)
 }
@@ -94,7 +96,7 @@ func (s *Shard) connect() *sql.DB {
 
 func (s *Shard) load() {
 	log.Printf("Loading shard %v", s.id)
-	download, err := s.config.storage.Download(s.config.kind, s.id)
+	download, err := s.config.Storage.Download(s.config.Name, s.id)
 	if os.IsNotExist(err) {
 		return
 	} else {
@@ -112,10 +114,10 @@ func (s *Shard) save() {
 	local, err := os.Open(s.dbPath())
 	try(err)
 
-	try(s.config.storage.Upload(s.config.kind, s.id, local))
+	try(s.config.Storage.Upload(s.config.Name, s.id, local))
 }
 
-func (s *Shard) Activate() *sql.DB {
+func (s *Shard) Activate() (*sql.DB, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -123,19 +125,19 @@ func (s *Shard) Activate() *sql.DB {
 		log.Printf("Activating shard %v", s.id)
 		s.load()
 		s.db = s.connect()
-		s.config.migrateCb(s.db)
+		s.config.MigrateCb(s.db)
 
 		go func() {
 			for {
 				select {
-				case <-time.After(s.config.saveInterval):
-					if time.Since(s.lastUsed) >= s.config.ttl {
+				case <-time.After(s.config.SaveInterval):
+					if time.Since(s.lastUsed) >= s.config.ActivationTtl {
 						s.Deactivate()
 					} else {
 						s.Save()
 					}
-				case <-time.After(s.config.ttl):
-					if time.Since(s.lastUsed) >= s.config.ttl {
+				case <-time.After(s.config.ActivationTtl):
+					if time.Since(s.lastUsed) >= s.config.ActivationTtl {
 						s.Deactivate()
 					}
 				case <-s.stopCh:
@@ -147,7 +149,7 @@ func (s *Shard) Activate() *sql.DB {
 	}
 
 	s.lastUsed = time.Now()
-	return s.db
+	return s.db, nil
 }
 
 func (s *Shard) Save() {
@@ -183,28 +185,17 @@ type Pile struct {
 	lock         *sync.Mutex
 	stopCh       chan bool
 	deactivateCh chan string
-	config       *ShardConfig
+	config       *Config
 }
 
-func NewPile(
-	name string, localPath string,
-	migrateCb func(*sql.DB) bool, storage Storer,
-) *Pile {
+func NewPile(config *Config) *Pile {
 	return &Pile{
 		started:      false,
 		shards:       make(map[string]*Shard),
 		lock:         &sync.Mutex{},
 		stopCh:       make(chan bool, 1),
 		deactivateCh: make(chan string),
-		config: &ShardConfig{
-			kind:         name,
-			dirPath:      localPath,
-			ttl:          time.Duration(5 * time.Second),
-			saveInterval: time.Duration(2 * time.Second),
-			migrateCb:    migrateCb,
-			storage:      storage,
-			lockMaker:    &LocalLockMaker{},
-		},
+		config:       config,
 	}
 }
 
@@ -216,7 +207,7 @@ func (p *Pile) Start() {
 		return
 	}
 
-	err := os.MkdirAll(path.Join(p.config.dirPath, p.config.kind), os.ModePerm)
+	err := os.MkdirAll(path.Join(p.config.DbPath, p.config.Name), os.ModePerm)
 	try(err)
 
 	go func() {
@@ -268,7 +259,7 @@ func (p *Pile) Shard(id string) *Shard {
 	shard, ok := p.shards[id]
 	if !ok {
 		shard = newShard(
-			id, p.deactivateCh, p.config.lockMaker.Make(id),
+			id, p.deactivateCh, p.config.Leaser.Make(id),
 			p.config,
 		)
 		p.shards[id] = shard
