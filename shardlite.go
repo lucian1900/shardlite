@@ -111,6 +111,10 @@ func (s *Shard) load() {
 func (s *Shard) save() {
 	log.Printf("Saving shard %v", s.id)
 
+	db := s.connect()
+	db.Exec("BEGIN EXCLUSIVE TRANSACTION")
+	defer db.Exec("END TRANSACTION")
+
 	local, err := os.Open(s.dbPath())
 	try(err)
 
