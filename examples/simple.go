@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"sync"
@@ -14,18 +15,14 @@ import (
 	"github.com/lucian1900/shardlite"
 )
 
-func migrate(db *sql.DB) bool {
+func migrate(db *sql.DB) error {
 	log.Printf("Running migration")
 
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS counters (
     	id INTEGER PRIMARY KEY AUTOINCREMENT,
     	count INTEGER
 	)`)
-	if err != nil {
-		panic(err)
-	}
-
-	return true
+	return err
 }
 
 type Files struct {
@@ -96,18 +93,23 @@ func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	host, err := os.Hostname()
-	if err != nil {
-		panic(err)
+	var port string
+	if len(os.Args) == 1 {
+		port = "8080"
+	} else {
+		port = os.Args[1]
 	}
-	port := 8080
 
+	shardlite.Debug = true
 	config := &shardlite.Config{
-		Name:          "users",
-		Url:           fmt.Sprintf("http://%s:%d", host, port),
+		Name: "users",
+		Url: url.URL{
+			Scheme: "https",
+			Host:   fmt.Sprintf("localhost:%s", port),
+		},
 		DbPath:        path.Join(os.TempDir(), "simple"),
-		SaveInterval:  time.Duration(2 * time.Second),
-		ActivationTtl: time.Duration(5 * time.Second),
+		SaveInterval:  time.Duration(5 * time.Second),
+		ActivationTtl: time.Duration(10 * time.Second),
 		MigrateCb:     migrate,
 		Storage:       Files{"dbs"},
 		Leaser:        LocalLeaser{},
@@ -117,7 +119,7 @@ func main() {
 
 	http.HandleFunc("/", api.handler)
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), nil); err != nil {
 		panic(err)
 	}
 }

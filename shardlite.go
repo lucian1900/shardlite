@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path"
 	"sync"
@@ -13,11 +14,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-func try(err error) {
-	if err != nil {
-		panic(err)
-	}
-}
+var Debug bool
 
 type Storer interface {
 	Upload(kind string, id string, file io.ReadSeeker) error
@@ -29,18 +26,18 @@ type LockerMaker interface {
 }
 
 type AlreadyActiveError struct {
-	Url string
+	Url url.URL
 }
 
 func (e *AlreadyActiveError) Error() string {
-	return fmt.Sprintf("already active: %s", e.Url)
+	return fmt.Sprintf("already active: %s", e.Url.String())
 }
 
 type Config struct {
 	Name          string
-	Url           string
+	Url           url.URL
 	DbPath        string
-	MigrateCb     func(*sql.DB) bool
+	MigrateCb     func(*sql.DB) error
 	ActivationTtl time.Duration
 	SaveInterval  time.Duration
 	Storage       Storer
@@ -84,41 +81,62 @@ func (s *Shard) dbPath() string {
 	)
 }
 
-func (s *Shard) connect() *sql.DB {
-	log.Printf("Path %v", s.dbPath())
+func (s *Shard) connect() (*sql.DB, error) {
+	if Debug {
+		log.Printf("Path %v", s.dbPath())
+	}
 
 	db, err := sql.Open("sqlite3", s.dbPath())
-	try(err)
-	try(db.Ping())
-
-	return db
-}
-
-func (s *Shard) load() {
-	log.Printf("Loading shard %v", s.id)
-	download, err := s.config.Storage.Download(s.config.Name, s.id)
-	if os.IsNotExist(err) {
-		return
-	} else {
-		try(err)
+	if err != nil {
+		return nil, err
 	}
-	local, err := os.Create(s.dbPath())
-	try(err)
-	_, err = io.Copy(local, download)
-	try(err)
+	err = db.Ping()
+	if err != nil {
+		return nil, err
+	} else {
+		return db, nil
+	}
 }
 
-func (s *Shard) save() {
-	log.Printf("Saving shard %v", s.id)
+func (s *Shard) load() error {
+	if Debug {
+		log.Printf("Loading shard %v", s.id)
+	}
 
-	db := s.connect()
-	db.Exec("BEGIN EXCLUSIVE TRANSACTION")
-	defer db.Exec("END TRANSACTION")
+	in, err := s.config.Storage.Download(s.config.Name, s.id)
+	if !os.IsNotExist(err) {
+		return err
+	}
+	out, err := os.Create(s.dbPath())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
 
-	local, err := os.Open(s.dbPath())
-	try(err)
+	if _, err := io.Copy(out, in); err != nil {
+		os.Remove(s.dbPath())
+		return err
+	}
+	return nil
+}
 
-	try(s.config.Storage.Upload(s.config.Name, s.id, local))
+func (s *Shard) save() error {
+	if Debug {
+		log.Printf("Saving shard %v", s.id)
+	}
+
+	_, err := s.db.Exec("BEGIN EXCLUSIVE TRANSACTION")
+	if err != nil {
+		return err
+	}
+	defer s.db.Exec("END TRANSACTION")
+
+	in, err := os.Open(s.dbPath())
+	if err != nil {
+		return err
+	}
+
+	return s.config.Storage.Upload(s.config.Name, s.id, in)
 }
 
 func (s *Shard) Activate() (*sql.DB, error) {
@@ -126,10 +144,21 @@ func (s *Shard) Activate() (*sql.DB, error) {
 	defer s.lock.Unlock()
 
 	if !s.active {
-		log.Printf("Activating shard %v", s.id)
-		s.load()
-		s.db = s.connect()
-		s.config.MigrateCb(s.db)
+		if Debug {
+			log.Printf("Activating shard %v", s.id)
+		}
+
+		if err := s.load(); err != nil {
+			return nil, err
+		}
+		db, err := s.connect()
+		if err != nil {
+			return nil, err
+		}
+		if err := s.config.MigrateCb(db); err != nil {
+			return nil, err
+		}
+		s.db = db
 
 		go func() {
 			for {
@@ -164,7 +193,9 @@ func (s *Shard) Save() {
 		return
 	}
 
-	s.save()
+	if err := s.save(); err != nil {
+		log.Print(err)
+	}
 }
 
 func (s *Shard) Deactivate() {
@@ -175,11 +206,23 @@ func (s *Shard) Deactivate() {
 		return
 	}
 
-	log.Printf("Deactivating shard %v", s.id)
-	s.save()
-	try(s.db.Close())
+	if Debug {
+		log.Printf("Deactivating shard %v", s.id)
+	}
+
+	if err := s.save(); err != nil {
+		log.Print(err)
+	} else {
+		if err := s.db.Close(); err != nil {
+			log.Print(err)
+		}
+		if err := os.Remove(s.dbPath()); err != nil {
+			log.Print(err)
+		}
+	}
 
 	s.active = false
+	s.db = nil
 	s.deactivateCh <- s.id
 }
 
@@ -203,16 +246,18 @@ func NewPile(config *Config) *Pile {
 	}
 }
 
-func (p *Pile) Start() {
+func (p *Pile) Start() error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
 	if p.started {
-		return
+		return nil
 	}
 
-	err := os.MkdirAll(path.Join(p.config.DbPath, p.config.Name), os.ModePerm)
-	try(err)
+	dbDir := path.Join(p.config.DbPath, p.config.Name)
+	if err := os.MkdirAll(dbDir, os.ModePerm); err != nil {
+		return err
+	}
 
 	go func() {
 		for {
@@ -226,6 +271,7 @@ func (p *Pile) Start() {
 	}()
 
 	p.started = true
+	return nil
 }
 
 func (p *Pile) Stop() {
@@ -244,9 +290,6 @@ func (p *Pile) Stop() {
 	for _, shard := range p.shards {
 		wg.Add(1)
 		go func(shard *Shard) {
-			shard.lock.Lock()
-			defer shard.lock.Unlock()
-
 			shard.Deactivate()
 			wg.Done()
 		}(shard)
