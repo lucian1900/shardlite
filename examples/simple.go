@@ -76,7 +76,13 @@ func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch e := err.(type) {
 		case *shardlite.AlreadyActiveError:
-			panic(e)
+			redirectUrl, err := url.Parse(e.Url)
+			if err != nil {
+				panic(err)
+			}
+			redirectUrl.Path = r.URL.Path
+			http.Redirect(w, r, redirectUrl.String(), http.StatusTemporaryRedirect)
+			return
 		default:
 			panic(err)
 		}
@@ -102,11 +108,8 @@ func main() {
 
 	shardlite.Debug = true
 	config := &shardlite.Config{
-		Name: "users",
-		Url: url.URL{
-			Scheme: "https",
-			Host:   fmt.Sprintf("localhost:%s", port),
-		},
+		Name:          "users",
+		Url:           fmt.Sprintf("http://localhost:%s", port),
 		DbPath:        path.Join(os.TempDir(), "simple"),
 		SaveInterval:  time.Duration(5 * time.Second),
 		ActivationTtl: time.Duration(10 * time.Second),

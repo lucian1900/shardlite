@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/url"
 	"os"
 	"path"
 	"sync"
@@ -21,21 +20,26 @@ type Storer interface {
 	Download(kind string, id string) (io.Reader, error)
 }
 
+type Locker interface {
+	Lock() error
+	Unlock() error
+}
+
 type LockerMaker interface {
 	Make(id string) sync.Locker
 }
 
 type AlreadyActiveError struct {
-	Url url.URL
+	Url string
 }
 
 func (e *AlreadyActiveError) Error() string {
-	return fmt.Sprintf("already active: %s", e.Url.String())
+	return fmt.Sprintf("already active: %s", e.Url)
 }
 
 type Config struct {
 	Name          string
-	Url           url.URL
+	Url           string
 	DbPath        string
 	MigrateCb     func(*sql.DB) error
 	ActivationTtl time.Duration
