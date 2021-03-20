@@ -87,7 +87,7 @@ func (s *Shard) dbPath() string {
 
 func (s *Shard) connect() (*sql.DB, error) {
 	if Debug {
-		log.Printf("Path %v", s.dbPath())
+		log.Printf("Db %v", s.dbPath())
 	}
 
 	db, err := sql.Open("sqlite3", s.dbPath())
@@ -208,7 +208,7 @@ func (s *Shard) Save() {
 	}
 
 	if err := s.save(); err != nil {
-		log.Print(err)
+		log.Printf("failed to save: %v", err)
 	}
 }
 
@@ -236,7 +236,7 @@ func (s *Shard) Deactivate() {
 	}
 
 	if err := s.lease.TryUnlock(); err != nil {
-		log.Fatal(err)
+		log.Printf("failed to unlock: %v", err)
 	}
 
 	s.active = false
@@ -301,7 +301,9 @@ func (p *Pile) Stop() {
 	}
 
 	p.stopCh <- true
-	log.Println("Shutting down")
+	if Debug {
+		log.Println("Shutting down")
+	}
 
 	wg := &sync.WaitGroup{}
 
