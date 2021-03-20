@@ -123,11 +123,18 @@ func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	db.Exec("INSERT INTO counters (count) VALUES (1)")
+	tx, err := db.Begin()
+	defer tx.Rollback()
+	if err != nil {
+		panic(err)
+	}
+	tx.Exec("INSERT INTO counters (count) VALUES (1)")
 
 	total := 0
-	row := db.QueryRow("SELECT SUM(count) FROM counters")
+	row := tx.QueryRow("SELECT SUM(count) FROM counters")
 	row.Scan(&total)
+
+	tx.Commit()
 
 	w.WriteHeader(200)
 	fmt.Fprintf(w, "%v\n", total)
