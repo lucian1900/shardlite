@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"sync"
 	"time"
 
 	"github.com/lucian1900/shardlite"
@@ -25,31 +24,30 @@ func migrate(db *sql.DB) error {
 	return err
 }
 
-type Files struct {
+type FileStorage struct {
 	dirPath string
 }
 
-func (f Files) path(kind string, id string) string {
+func (f FileStorage) path(kind string, id string) string {
 	return path.Join(f.dirPath, kind, fmt.Sprintf("%s.db", id))
 }
 
-func (f Files) Upload(kind string, id string, in io.ReadSeeker) error {
-	err := os.MkdirAll(path.Join(f.dirPath, kind), os.ModePerm)
-	if err != nil {
+func (f FileStorage) Upload(kind string, id string, in io.ReadSeeker) error {
+	if err := os.MkdirAll(path.Join(f.dirPath, kind), os.ModePerm); err != nil {
 		return err
 	}
 	out, err := os.Create(f.path(kind, id))
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(out, in)
-	if err != nil {
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (f Files) Download(kind string, id string) (io.Reader, error) {
+func (f FileStorage) Download(kind string, id string) (io.ReadCloser, error) {
 	out, err := os.Open(f.path(kind, id))
 	if err != nil {
 		return nil, err
@@ -57,11 +55,48 @@ func (f Files) Download(kind string, id string) (io.Reader, error) {
 	return out, nil
 }
 
-type LocalLeaser struct {
+type FileLock struct {
+	path string
+	url  string
 }
 
-func (s LocalLeaser) Make(id string) sync.Locker {
-	return &sync.Mutex{}
+func (l FileLock) TryLock() error {
+	log.Printf("Locking %v", l.path)
+
+	data, err := os.ReadFile(l.path)
+	if err == nil {
+		return &shardlite.ErrAlreadyActive{Url: string(data)}
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.WriteFile(l.path, []byte(l.url), os.ModePerm); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (l FileLock) TryUnlock() error {
+	log.Printf("Unlocking %v", l.path)
+
+	if err := os.Remove(l.path); err != nil {
+		return err
+	}
+	return nil
+}
+
+type FileLeaser struct {
+	dirPath string
+}
+
+func (l FileLeaser) MakeLock(kind string, id string, url string) shardlite.Locker {
+	if err := os.MkdirAll(path.Join(l.dirPath, kind), os.ModePerm); err != nil {
+		panic(err)
+	}
+	return FileLock{
+		path: path.Join(l.dirPath, kind, fmt.Sprintf("%s.lock", id)),
+		url:  url,
+	}
 }
 
 type API struct {
@@ -75,7 +110,7 @@ func (a *API) handler(w http.ResponseWriter, r *http.Request) {
 	db, err := shard.Activate()
 	if err != nil {
 		switch e := err.(type) {
-		case *shardlite.AlreadyActiveError:
+		case *shardlite.ErrAlreadyActive:
 			redirectUrl, err := url.Parse(e.Url)
 			if err != nil {
 				panic(err)
@@ -114,8 +149,8 @@ func main() {
 		SaveInterval:  time.Duration(5 * time.Second),
 		ActivationTtl: time.Duration(10 * time.Second),
 		MigrateCb:     migrate,
-		Storage:       Files{"dbs"},
-		Leaser:        LocalLeaser{},
+		Storage:       FileStorage{"dbs"},
+		Leaser:        FileLeaser{"locks"},
 	}
 	api := &API{shardlite.NewPile(config)}
 	api.users.Start()

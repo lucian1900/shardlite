@@ -17,23 +17,23 @@ var Debug bool
 
 type Storer interface {
 	Upload(kind string, id string, file io.ReadSeeker) error
-	Download(kind string, id string) (io.Reader, error)
+	Download(kind string, id string) (io.ReadCloser, error)
 }
 
 type Locker interface {
-	Lock() error
-	Unlock() error
+	TryLock() error
+	TryUnlock() error
 }
 
 type LockerMaker interface {
-	Make(id string) sync.Locker
+	MakeLock(kind string, id string, url string) Locker
 }
 
-type AlreadyActiveError struct {
+type ErrAlreadyActive struct {
 	Url string
 }
 
-func (e *AlreadyActiveError) Error() string {
+func (e *ErrAlreadyActive) Error() string {
 	return fmt.Sprintf("already active: %s", e.Url)
 }
 
@@ -56,12 +56,12 @@ type Shard struct {
 	lock         *sync.Mutex
 	deactivateCh chan string
 	stopCh       chan bool
-	lease        sync.Locker
+	lease        Locker
 	config       *Config
 }
 
 func newShard(
-	id string, deactivateCh chan string, lease sync.Locker,
+	id string, deactivateCh chan string, lease Locker,
 	config *Config,
 ) *Shard {
 	return &Shard{
@@ -108,9 +108,14 @@ func (s *Shard) load() error {
 	}
 
 	in, err := s.config.Storage.Download(s.config.Name, s.id)
-	if !os.IsNotExist(err) {
-		return err
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		} else {
+			return err
+		}
 	}
+	defer in.Close()
 	out, err := os.Create(s.dbPath())
 	if err != nil {
 		return err
@@ -139,6 +144,7 @@ func (s *Shard) save() error {
 	if err != nil {
 		return err
 	}
+	defer in.Close()
 
 	return s.config.Storage.Upload(s.config.Name, s.id, in)
 }
@@ -150,6 +156,10 @@ func (s *Shard) Activate() (*sql.DB, error) {
 	if !s.active {
 		if Debug {
 			log.Printf("Activating shard %v", s.id)
+		}
+
+		if err := s.lease.TryLock(); err != nil {
+			return nil, err
 		}
 
 		if err := s.load(); err != nil {
@@ -223,6 +233,10 @@ func (s *Shard) Deactivate() {
 		if err := os.Remove(s.dbPath()); err != nil {
 			log.Print(err)
 		}
+	}
+
+	if err := s.lease.TryUnlock(); err != nil {
+		log.Fatal(err)
 	}
 
 	s.active = false
@@ -310,7 +324,8 @@ func (p *Pile) Shard(id string) *Shard {
 	shard, ok := p.shards[id]
 	if !ok {
 		shard = newShard(
-			id, p.deactivateCh, p.config.Leaser.Make(id),
+			id, p.deactivateCh,
+			p.config.Leaser.MakeLock(p.config.Name, id, p.config.Url),
 			p.config,
 		)
 		p.shards[id] = shard

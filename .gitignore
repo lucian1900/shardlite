@@ -18,4 +18,5 @@
 .vscode
 
 # Data
-dbs
+examples/dbs
+examples/locks
