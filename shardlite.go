@@ -173,6 +173,7 @@ func (s *Shard) Activate() (*sql.DB, error) {
 			return nil, err
 		}
 		s.db = db
+		s.active = true
 
 		go func() {
 			for {
@@ -192,7 +193,6 @@ func (s *Shard) Activate() (*sql.DB, error) {
 				}
 			}
 		}()
-		s.active = true
 	}
 
 	s.lastUsed = time.Now()

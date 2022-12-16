@@ -86,15 +86,16 @@ func (l FileLock) TryUnlock() error {
 }
 
 type FileLeaser struct {
-	dirPath string
+	pathPrefix string
 }
 
 func (l FileLeaser) MakeLock(kind string, id string, url string) shardlite.Locker {
-	if err := os.MkdirAll(path.Join(l.dirPath, kind), os.ModePerm); err != nil {
+	dirPath := path.Join(l.pathPrefix, kind)
+	if err := os.MkdirAll(dirPath, os.ModePerm); err != nil {
 		panic(err)
 	}
 	return FileLock{
-		path: path.Join(l.dirPath, kind, fmt.Sprintf("%s.lock", id)),
+		path: path.Join(dirPath, kind, fmt.Sprintf("%s.lock", id)),
 		url:  url,
 	}
 }
